@@ -1,0 +1,608 @@
+import flet as ft
+import sqlite3
+import datetime
+import pandas as pd
+import hashlib
+
+class AttendanceApp:
+    def __init__(self):
+        self.page = None
+        self.db_path = "attendance.db"
+        self.current_user = None
+        self.is_admin = False
+        self.init_database()
+        
+    def init_database(self):
+        """Initialize the SQLite database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Create employees table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                fingerprint_hash TEXT UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create attendance table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS attendance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER,
+                check_in_time TIMESTAMP,
+                check_out_time TIMESTAMP,
+                date TEXT,
+                FOREIGN KEY (employee_id) REFERENCES employees (id)
+            )
+        ''')
+        
+        # Create admin table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS admin (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL
+            )
+        ''')
+        
+        # Insert default admin if not exists
+        cursor.execute("SELECT * FROM admin WHERE username = 'admin'")
+        if not cursor.fetchone():
+            admin_password = hashlib.sha256("123".encode()).hexdigest()
+            cursor.execute("INSERT INTO admin (username, password_hash) VALUES (?, ?)", 
+                         ("admin", admin_password))
+        
+        conn.commit()
+        conn.close()
+    
+    def hash_fingerprint(self, fingerprint_data):
+        """Hash fingerprint data for secure storage"""
+        return hashlib.sha256(fingerprint_data.encode()).hexdigest()
+    
+    def main(self, page: ft.Page):
+        self.page = page
+        page.title = "نظام الحضور والانصراف"
+        page.vertical_alignment = ft.MainAxisAlignment.CENTER
+        page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
+        page.theme_mode = ft.ThemeMode.LIGHT
+        page.window.width = 400
+        page.window.height = 600
+        
+        # Show login screen
+        self.show_login_screen()
+        
+    def show_login_screen(self):
+        """Show main screen with fingerprint check-in/out as primary"""
+        def authenticate_fingerprint(e):
+            # Simulate fingerprint authentication
+            fingerprint_data = "simulated_fingerprint_" + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            fingerprint_hash = self.hash_fingerprint(fingerprint_data)
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM employees WHERE fingerprint_hash = ?", (fingerprint_hash,))
+            employee = cursor.fetchone()
+            
+            if employee:
+                self.current_user = employee[1]
+                self.check_attendance_status(employee[0])
+            else:
+                self.show_error("البصمة غير مسجلة. يرجى التواصل مع المشرف.")
+            
+            conn.close()
+        
+        def show_admin_login(e):
+            self.show_admin_login_screen()
+        
+        # Main fingerprint button - large and prominent
+        fingerprint_btn = ft.Button(
+            "مسح البصمة",
+            on_click=authenticate_fingerprint,
+            width=300,
+            height=80,
+            bgcolor=ft.Colors.GREEN_600,
+            color=ft.Colors.WHITE
+        )
+        
+        # Small admin button at bottom
+        admin_btn = ft.TextButton(
+            "دخول المشرف",
+            on_click=show_admin_login
+        )
+        
+        main_column = ft.Column(
+            [
+                ft.Text("نظام الحضور والانصراف", size=28, weight=ft.FontWeight.BOLD),
+                ft.Text("ضع إصبعك على البصمة", size=16),
+                fingerprint_btn,
+                ft.Container(height=50),  # Spacer
+                admin_btn
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=20
+        )
+        
+        self.page.controls.clear()
+        self.page.add(main_column)
+        self.page.update()
+    
+    def show_admin_login_screen(self):
+        """Show admin login screen"""
+        def login_admin(e):
+            username = username_field.value
+            password = password_field.value
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM admin WHERE username = ?", (username,))
+            admin = cursor.fetchone()
+            conn.close()
+            
+            if admin and admin[2] == hashlib.sha256(password.encode()).hexdigest():
+                self.is_admin = True
+                self.current_user = username
+                self.show_admin_panel()
+            else:
+                self.show_error("بيانات الدخول غير صحيحة")
+        
+        def back_to_main(e):
+            self.show_login_screen()
+        
+        username_field = ft.TextField(
+            label="اسم المستخدم",
+            width=300,
+            text_align=ft.TextAlign.CENTER
+        )
+        
+        password_field = ft.TextField(
+            label="كلمة المرور",
+            password=True,
+            can_reveal_password=True,
+            width=300,
+            text_align=ft.TextAlign.CENTER
+        )
+        
+        login_btn = ft.Button(
+            "دخول المشرف",
+            on_click=login_admin,
+            width=300,
+            height=40
+        )
+        
+        back_btn = ft.TextButton("العودة", on_click=back_to_main)
+        
+        admin_column = ft.Column(
+            [
+                ft.Text("دخول المشرف", size=20, weight=ft.FontWeight.BOLD),
+                username_field,
+                password_field,
+                login_btn,
+                back_btn
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=20
+        )
+        
+        self.page.controls.clear()
+        self.page.add(admin_column)
+        self.page.update()
+    
+        
+    def check_attendance_status(self, employee_id):
+        """Check if employee is checking in or out"""
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM attendance 
+            WHERE employee_id = ? AND date = ? AND check_out_time IS NULL
+        """, (employee_id, today))
+        
+        active_record = cursor.fetchone()
+        conn.close()
+        
+        if active_record:
+            self.check_out(employee_id, active_record[0])
+        else:
+            self.check_in(employee_id)
+    
+    def check_in(self, employee_id):
+        """Record check-in time"""
+        now = datetime.datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO attendance (employee_id, check_in_time, date)
+            VALUES (?, ?, ?)
+        """, (employee_id, time_str, date_str))
+        conn.commit()
+        conn.close()
+        
+        self.show_success(f"تم تسجيل الدخول بنجاح في {time_str}")
+        self.show_login_screen()
+    
+    def check_out(self, employee_id, attendance_id):
+        """Record check-out time"""
+        now = datetime.datetime.now()
+        time_str = now.strftime("%H:%M:%S")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE attendance 
+            SET check_out_time = ?
+            WHERE id = ?
+        """, (time_str, attendance_id))
+        conn.commit()
+        conn.close()
+        
+        self.show_success(f"تم تسجيل الخروج بنجاح في {time_str}")
+        self.show_login_screen()
+    
+    def show_admin_panel(self):
+        """Show admin panel"""
+        def register_fingerprint(e):
+            self.show_fingerprint_registration()
+        
+        def export_records(e):
+            self.export_attendance_records()
+        
+        def view_records(e):
+            self.view_attendance_records()
+        
+        def view_fingerprints(e):
+            self.view_fingerprint_list()
+        
+        def logout(e):
+            self.is_admin = False
+            self.current_user = None
+            self.show_login_screen()
+        
+        register_btn = ft.Button(
+            "تسجيل بصمة",
+            on_click=register_fingerprint,
+            width=300,
+            height=40
+        )
+        
+        export_btn = ft.Button(
+            "تصدير إلى إكسل",
+            on_click=export_records,
+            width=300,
+            height=40
+        )
+        
+        view_btn = ft.Button(
+            "عرض السجلات",
+            on_click=view_records,
+            width=300,
+            height=40
+        )
+        
+        fingerprints_btn = ft.Button(
+            "عرض البصمات",
+            on_click=view_fingerprints,
+            width=300,
+            height=40
+        )
+        
+        logout_btn = ft.TextButton("تسجيل الخروج", on_click=logout)
+        
+        admin_column = ft.Column(
+            [
+                ft.Text(f"لوحة التحكم - {self.current_user}", size=20, weight=ft.FontWeight.BOLD),
+                register_btn,
+                view_btn,
+                export_btn,
+                fingerprints_btn,
+                logout_btn
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=20
+        )
+        
+        self.page.controls.clear()
+        self.page.add(admin_column)
+        self.page.update()
+    
+    def show_fingerprint_registration(self):
+        """Show fingerprint registration screen"""
+        # State to track if fingerprint is captured
+        self.fingerprint_captured = False
+        self.captured_fingerprint_hash = None
+        
+        def save_fingerprint(e):
+            name = name_field.value
+            if not name:
+                self.show_error("يرجى إدخال اسم الموظف")
+                return
+            
+            if not self.fingerprint_captured:
+                self.show_error("يرجى التقاط البصمة أولاً")
+                return
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            try:
+                cursor.execute("""
+                    INSERT INTO employees (name, fingerprint_hash)
+                    VALUES (?, ?)
+                """, (name, self.captured_fingerprint_hash))
+                conn.commit()
+                self.show_success(f"تم تسجيل الموظف {name} بنجاح!")
+                self.show_admin_panel()
+            except sqlite3.IntegrityError:
+                self.show_error("البصمة مسجلة مسبقاً")
+            finally:
+                conn.close()
+        
+        def capture_fingerprint(e):
+            # Simulate fingerprint capture
+            fingerprint_data = "simulated_fingerprint_" + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            self.captured_fingerprint_hash = self.hash_fingerprint(fingerprint_data)
+            self.fingerprint_captured = True
+            fingerprint_status.value = "تم التقاط البصمة ✓"
+            fingerprint_status.color = ft.Colors.GREEN_600
+            self.page.update()
+        
+        def delete_fingerprint(e):
+            self.fingerprint_captured = False
+            self.captured_fingerprint_hash = None
+            fingerprint_status.value = "لم يتم التقاط البصمة"
+            fingerprint_status.color = ft.Colors.RED_600
+            self.page.update()
+        
+        def back_to_admin(e):
+            self.show_admin_panel()
+        
+        name_field = ft.TextField(
+            label="اسم الموظف",
+            width=300,
+            text_align=ft.TextAlign.CENTER
+        )
+        
+        fingerprint_status = ft.Text(
+            "لم يتم التقاط البصمة",
+            color=ft.Colors.RED_600,
+            size=14
+        )
+        
+        capture_btn = ft.Button(
+            "حفظ البصمة",
+            on_click=capture_fingerprint,
+            width=300,
+            height=40,
+            bgcolor=ft.Colors.BLUE_600,
+            color=ft.Colors.WHITE
+        )
+        
+        delete_btn = ft.Button(
+            "مسح البصمة",
+            on_click=delete_fingerprint,
+            width=300,
+            height=40,
+            bgcolor=ft.Colors.ORANGE_600,
+            color=ft.Colors.WHITE
+        )
+        
+        register_btn = ft.Button(
+            "تسجيل الموظف",
+            on_click=save_fingerprint,
+            width=300,
+            height=40,
+            bgcolor=ft.Colors.GREEN_600,
+            color=ft.Colors.WHITE
+        )
+        
+        back_btn = ft.TextButton("العودة للوحة التحكم", on_click=back_to_admin)
+        
+        registration_column = ft.Column(
+            [
+                ft.Text("تسجيل موظف جديد", size=20, weight=ft.FontWeight.BOLD),
+                name_field,
+                fingerprint_status,
+                capture_btn,
+                delete_btn,
+                ft.Container(height=20),  # Spacer
+                register_btn,
+                back_btn
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=15
+        )
+        
+        self.page.controls.clear()
+        self.page.add(registration_column)
+        self.page.update()
+    
+    def view_attendance_records(self):
+        """View attendance records"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT e.name, a.date, a.check_in_time, a.check_out_time
+            FROM attendance a
+            JOIN employees e ON a.employee_id = e.id
+            ORDER BY a.date DESC, a.check_in_time DESC
+        """)
+        
+        records = cursor.fetchall()
+        conn.close()
+        
+        # Create data table
+        data_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("اسم الموظف")),
+                ft.DataColumn(ft.Text("التاريخ")),
+                ft.DataColumn(ft.Text("وقت الدخول")),
+                ft.DataColumn(ft.Text("وقت الخروج")),
+            ],
+            rows=[
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(record[0])),
+                        ft.DataCell(ft.Text(record[1])),
+                        ft.DataCell(ft.Text(record[2])),
+                        ft.DataCell(ft.Text(record[3] or "نشط")),
+                    ]
+                ) for record in records
+            ],
+            border=ft.border.all(1, ft.Colors.GREY_300),
+        )
+        
+        def back_to_admin(e):
+            self.show_admin_panel()
+        
+        back_btn = ft.TextButton("العودة للوحة التحكم", on_click=back_to_admin)
+        
+        records_column = ft.Column(
+            [
+                ft.Text("سجلات الحضور والانصراف", size=20, weight=ft.FontWeight.BOLD),
+                ft.Container(
+                    content=data_table,
+                    height=400,
+                    width=600,
+                    padding=10
+                ),
+                back_btn
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=20
+        )
+        
+        self.page.controls.clear()
+        self.page.add(records_column)
+        self.page.update()
+    
+    def export_attendance_records(self):
+        """Export attendance records to Excel"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT e.name, a.date, a.check_in_time, a.check_out_time
+            FROM attendance a
+            JOIN employees e ON a.employee_id = e.id
+            ORDER BY a.date DESC, a.check_in_time DESC
+        """)
+        
+        records = cursor.fetchall()
+        conn.close()
+        
+        # Create DataFrame
+        df = pd.DataFrame(records, columns=['اسم الموظف', 'التاريخ', 'وقت الدخول', 'وقت الخروج'])
+        
+        # Export to Excel
+        filename = f"سجلات_الحضور_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        df.to_excel(filename, index=False)
+        
+        self.show_success(f"تم تصدير السجلات إلى {filename}")
+    
+    def show_success(self, message):
+        """Show success message"""
+        dlg = ft.AlertDialog(
+            title=ft.Text("نجاح"),
+            content=ft.Text(message),
+            actions=[ft.TextButton("موافق", on_click=lambda e: self.close_dialog(dlg))]
+        )
+        self.page.dialog = dlg
+        dlg.open = True
+        self.page.update()
+    
+    def show_error(self, message):
+        """Show error message"""
+        dlg = ft.AlertDialog(
+            title=ft.Text("خطأ"),
+            content=ft.Text(message),
+            actions=[ft.TextButton("موافق", on_click=lambda e: self.close_dialog(dlg))]
+        )
+        self.page.dialog = dlg
+        dlg.open = True
+        self.page.update()
+    
+    def view_fingerprint_list(self):
+        """View and delete registered fingerprints"""
+        def delete_employee(e, employee_id):
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+                conn.commit()
+                self.show_message("تم حذف الموظف بنجاح", "نجاح")
+                self.view_fingerprint_list()  # Refresh the list
+            except:
+                self.show_message("خطأ في حذف الموظف", "خطأ")
+            finally:
+                conn.close()
+        
+        def back_to_admin(e):
+            self.show_admin_panel()
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, created_at FROM employees ORDER BY created_at DESC")
+        employees = cursor.fetchall()
+        conn.close()
+        
+        # Create data table
+        data_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("اسم الموظف")),
+                ft.DataColumn(ft.Text("تاريخ التسجيل")),
+                ft.DataColumn(ft.Text("الإجراءات")),
+            ],
+            rows=[
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(employee[1])),
+                        ft.DataCell(ft.Text(employee[2])),
+                        ft.DataCell(
+                            ft.Button(
+                                "حذف",
+                                on_click=lambda e, emp_id=employee[0]: delete_employee(e, emp_id),
+                                width=80,
+                                height=30,
+                                bgcolor=ft.Colors.RED_600,
+                                color=ft.Colors.WHITE
+                            )
+                        )
+                    ]
+                ) for employee in employees
+            ],
+            border=ft.border.all(1, ft.Colors.GREY_300),
+        )
+        
+        fingerprints_column = ft.Column(
+            [
+                ft.Text("البصمات المسجلة", size=20, weight=ft.FontWeight.BOLD),
+                ft.Container(
+                    content=data_table,
+                    height=400,
+                    width=600,
+                    padding=10
+                ),
+                ft.TextButton("العودة للوحة التحكم", on_click=back_to_admin)
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=20
+        )
+        
+        self.page.controls.clear()
+        self.page.add(fingerprints_column)
+        self.page.update()
+    
+    def close_dialog(self, dialog):
+        """Close dialog"""
+        dialog.open = False
+        self.page.update()
+
+if __name__ == "__main__":
+    app = AttendanceApp()
+    ft.run(app.main)
